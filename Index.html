@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Putaway Audit</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html5-qrcode/2.3.8/html5-qrcode.min.js"></script>
+<style>
+  body { font-family: Arial, sans-serif; margin: 0; padding: 14px; background: #f1f3f4; font-size: 20px; }
+  .box { background: #fff; border-radius: 12px; padding: 16px; margin-bottom: 12px; box-shadow: 0 1px 3px rgba(0,0,0,.2); }
+  h2 { margin: 0 0 8px; }
+  small { color: #5f6368; font-size: 16px; }
+  .big { font-size: 28px; font-weight: bold; word-break: break-all; }
+  input, textarea { width: 100%; box-sizing: border-box; font-size: 22px; padding: 14px; margin: 8px 0; border: 2px solid #ccc; border-radius: 8px; }
+  button { width: 100%; font-size: 22px; font-weight: bold; padding: 18px; margin-top: 8px; border: 0; border-radius: 10px; color: #fff; background: #1a73e8; }
+  button.green { background: #188038; }
+  button.orange { background: #e37400; }
+  button.grey { background: #5f6368; }
+  button:disabled { opacity: .5; }
+  .link { display: block; color: #1a73e8; margin: 10px 0; font-size: 18px; text-decoration: underline; }
+  .hidden { display: none; }
+  #msg { font-weight: bold; color: #188038; margin-top: 8px; }
+  .item { padding: 8px 0; border-bottom: 1px solid #eee; font-size: 18px; }
+  #thumb { max-width: 100%; border-radius: 8px; margin-top: 8px; }
+  #scan { position: fixed; inset: 0; background: #000; z-index: 10; padding: 14px; overflow: auto; }
+  #scan p { color: #fff; text-align: center; font-size: 20px; }
+  #reader { width: 100%; max-width: 500px; margin: 0 auto; }
+</style>
+</head>
+<body>
+
+<!-- 1: Employee ID -->
+<div id="s1" class="box">
+  <h2>Putaway Audit</h2>
+  <small>Enter Employee ID</small>
+  <input id="emp" placeholder="Employee ID" autocomplete="off">
+  <button onclick="login()">START</button>
+</div>
+
+<!-- 2: Location -->
+<div id="s2" class="box hidden">
+  <h2>Scan location</h2>
+  <button class="green" onclick="scanLoc()">📷 SCAN LOCATION QR</button>
+  <a class="link" onclick="toggle('locManual')">QR not working? Type it</a>
+  <div id="locManual" class="hidden">
+    <input id="locText" placeholder="Location code" autocomplete="off">
+    <button onclick="setLoc($('locText').value)">CONTINUE</button>
+  </div>
+  <button class="grey" onclick="logout()">Change employee</button>
+</div>
+
+<!-- 3: Audit (one screen = one row) -->
+<div id="s3" class="hidden">
+  <div class="box"><small>Location</small><div class="big" id="curLoc"></div></div>
+
+  <div class="box">
+    <button class="green" onclick="scanUpc()">📷 SCAN BARCODE</button>
+    <input id="upc" placeholder="Barcode number" inputmode="numeric" autocomplete="off">
+    <input id="qty" type="number" inputmode="numeric" placeholder="Quantity (physical count)">
+
+    <button class="orange" onclick="takePhoto()">📸 TAKE BIN PHOTO (optional)</button>
+    <input id="photo" type="file" accept="image/*" capture="environment" class="hidden">
+    <img id="thumb" class="hidden">
+    <a id="rmPhoto" class="link hidden" onclick="clearPhoto()">Remove photo</a>
+
+    <textarea id="remark" rows="2" placeholder="Remark (optional)"></textarea>
+
+    <button id="btnSave" onclick="saveRow()">✔ SAVE</button>
+    <div id="msg"></div>
+    <div id="list"></div>
+  </div>
+
+  <button class="grey" onclick="nextLoc()">NEXT LOCATION →</button>
+</div>
+
+<!-- Camera -->
+<div id="scan" class="hidden">
+  <div id="reader"></div>
+  <p id="scanMsg"></p>
+  <button class="grey" onclick="closeScan()">CANCEL</button>
+</div>
+
+<script>
+  const API = 'https://script.google.com/a/macros/zomato.com/s/APKA_POORA_ASLI_URL/exec';
+  const $ = id => document.getElementById(id);
+  const show = id => ['s1','s2','s3'].forEach(s => $(s).classList.toggle('hidden', s !== id));
+  const toggle = id => $(id).classList.toggle('hidden');
+  const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+  let empId = '', loc = '', photoData = '', h5 = null;
+
+  try { $('emp').value = localStorage.getItem('emp') || ''; } catch (e) {}
+
+  async function send(data) {
+    const r = await fetch(API, { method: 'POST', body: JSON.stringify(data) });
+    const j = await r.json();
+    if (!j.ok) throw new Error(j.error || 'Save failed');
+  }
+
+  // ---------- Live camera scanner ----------
+  async function openScan(kind, cb) {
+    $('scan').classList.remove('hidden');
+    $('scanMsg').textContent = 'Starting camera...';
+    const F = Html5QrcodeSupportedFormats;
+    const formats = kind === 'qr' ? [F.QR_CODE] : [F.EAN_13, F.EAN_8, F.UPC_A, F.UPC_E];
+    h5 = new Html5Qrcode('reader', {
+      formatsToSupport: formats, verbose: false,
+      experimentalFeatures: { useBarCodeDetectorIfSupported: true }
+    });
+    const box = kind === 'qr' ? { width: 250, height: 250 } : { width: 320, height: 140 };
+    try {
+      await h5.start({ facingMode: 'environment' }, { fps: 10, qrbox: box },
+        async text => {
+          if (!h5) return;
+          await closeScan();
+          if (navigator.vibrate) navigator.vibrate(100);
+          cb(String(text).trim());
+        }, () => {});
+      $('scanMsg').textContent = kind === 'qr' ? 'Point camera at the location QR' : 'Point camera at the barcode';
+    } catch (e) {
+      $('scanMsg').textContent = 'Camera did not open. Allow Camera permission in the browser.';
+    }
+  }
+
+  async function closeScan() {
+    const x = h5; h5 = null;
+    try { if (x && x.isScanning) await x.stop(); } catch (e) {}
+    try { if (x) x.clear(); } catch (e) {}
+    $('scan').classList.add('hidden');
+  }
+
+  // ---------- Flow ----------
+  function login() {
+    empId = $('emp').value.trim().toUpperCase();
+    if (!empId) return alert('Enter Employee ID');
+    try { localStorage.setItem('emp', empId); } catch (e) {}
+    goLoc();
+  }
+  function logout() { show('s1'); $('emp').focus(); }
+  function goLoc() { $('locText').value = ''; show('s2'); }
+
+  function scanLoc() { openScan('qr', t => setLoc(t)); }
+  function setLoc(v) {
+    v = String(v).trim().toUpperCase();
+    if (!v) return;
+    loc = v;
+    $('curLoc').textContent = loc;
+    $('list').innerHTML = ''; $('msg').textContent = '';
+    clearForm();
+    show('s3');
+  }
+
+  function scanUpc() { openScan('barcode', t => { $('upc').value = t; $('qty').focus(); }); }
+
+  // ---------- Bin photo (opens the camera directly) ----------
+  function takePhoto() { $('photo').click(); }
+
+  $('photo').addEventListener('change', e => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = ev => {
+      const img = new Image();
+      img.onload = () => {
+        const s = Math.min(1, 1024 / Math.max(img.width, img.height));
+        const c = document.createElement('canvas');
+        c.width = img.width * s; c.height = img.height * s;
+        c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+        const url = c.toDataURL('image/jpeg', 0.7);
+        photoData = url.split(',')[1];
+        $('thumb').src = url;
+        $('thumb').classList.remove('hidden');
+        $('rmPhoto').classList.remove('hidden');
+      };
+      img.src = ev.target.result;
+    };
+    reader.readAsDataURL(file);
+  });
+
+  function clearPhoto() {
+    photoData = ''; $('photo').value = '';
+    $('thumb').classList.add('hidden'); $('rmPhoto').classList.add('hidden');
+  }
+
+  function clearForm() {
+    $('upc').value = ''; $('qty').value = ''; $('remark').value = '';
+    clearPhoto();
+  }
+
+  // ---------- Save: ONE row with everything ----------
+  async function saveRow() {
+    const upc = $('upc').value.trim(), qty = $('qty').value, remarks = $('remark').value.trim();
+    if (upc) {
+      if (qty === '') return alert('Enter the quantity');
+    } else if (!photoData && !remarks) {
+      return alert('Scan a barcode, or add a photo/remark for the bin');
+    }
+    $('btnSave').disabled = true;
+    try {
+      await send({ empId, location: loc, upc, qty: qty === '' ? '' : Number(qty),
+                   remarks, photo: photoData });
+      const label = upc ? `${esc(upc)} — Qty ${esc(qty)}` : 'Bin note';
+      const cam = photoData ? ' 📸' : '';
+      $('list').insertAdjacentHTML('afterbegin', `<div class="item">✔ ${label}${cam}</div>`);
+      $('msg').textContent = 'Saved ✔';
+      clearForm();
+    } catch (e) {
+      alert('Not saved. Check internet and press Save again.\n' + e.message);
+    }
+    $('btnSave').disabled = false;
+  }
+
+  function nextLoc() { if (confirm('Done with this location?')) goLoc(); }
+
+  $('emp').addEventListener('keydown', e => { if (e.key === 'Enter') login(); });
+  $('upc').addEventListener('keydown', e => { if (e.key === 'Enter') $('qty').focus(); });
+  $('qty').addEventListener('keydown', e => { if (e.key === 'Enter') saveRow(); });
+  $('locText').addEventListener('keydown', e => { if (e.key === 'Enter') setLoc($('locText').value); });
+</script>
+</body>
+</html>

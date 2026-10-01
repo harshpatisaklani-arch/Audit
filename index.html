@@ -164,8 +164,10 @@ const API = 'https://script.google.com/a/macros/zomato.com/s/YOUR_FULL_ID/exec';
       formatsToSupport: formats, verbose: false,
       experimentalFeatures: { useBarCodeDetectorIfSupported: true }
     });
-    const cfg = kind === 'qr' ? { fps: 10, qrbox: { width: 250, height: 250 } } : { fps: 15 };
-    const cam = { facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1080 } };
+    const cfg = kind === 'qr'
+      ? { fps: 10, qrbox: { width: 250, height: 250 } }
+      : { fps: 15, videoConstraints: { facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1080 } } };
+    const cam = { facingMode: 'environment' };
     try {
       await h5.start(cam, cfg, async text => {
         if (!h5) return;
@@ -175,7 +177,7 @@ const API = 'https://script.google.com/a/macros/zomato.com/s/YOUR_FULL_ID/exec';
       }, () => {});
       $('scanMsg').textContent = kind === 'qr' ? 'Point camera at the location QR' : 'Hold the barcode flat in front of the camera';
     } catch (e) {
-      $('scanMsg').textContent = 'Camera did not open. Allow Camera permission in the browser.';
+      $('scanMsg').textContent = 'Camera did not open: ' + (e && e.message ? e.message : e);
     }
   }
 

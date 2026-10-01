@@ -20,11 +20,12 @@
   .link { display: block; color: #1a73e8; margin: 10px 0; font-size: 18px; text-decoration: underline; }
   .hidden { display: none; }
   #msg { font-weight: bold; color: #188038; margin-top: 8px; }
-  .item { padding: 8px 0; border-bottom: 1px solid #eee; font-size: 18px; }
+  .item { padding: 8px 0; border-bottom: 1px solid #eee; font-size: 18px; word-break: break-all; }
   #thumb { max-width: 100%; border-radius: 8px; margin-top: 8px; }
   #scan { position: fixed; inset: 0; background: #000; z-index: 10; padding: 14px; overflow: auto; }
   #scan p { color: #fff; text-align: center; font-size: 20px; }
   #reader { width: 100%; max-width: 500px; margin: 0 auto; }
+  #vid { width: 100%; max-width: 500px; display: block; margin: 0 auto; border-radius: 8px; }
 </style>
 </head>
 <body>
@@ -54,8 +55,9 @@
   <div class="box"><small>Location</small><div class="big" id="curLoc"></div></div>
 
   <div class="box">
-    <button class="green" onclick="scanUpc()">📷 SCAN BARCODE</button>
-    <input id="upc" placeholder="Barcode number" inputmode="numeric" autocomplete="off">
+    <h2>Scan product barcode (UPC)</h2>
+    <button class="green" onclick="scanUpc()">📷 UPC SCAN BARCODE</button>
+    <input id="upc" placeholder="Or type barcode" autocomplete="off" autocapitalize="off">
     <input id="qty" type="number" inputmode="numeric" placeholder="Quantity (physical count)">
 
     <button class="orange" onclick="takePhoto()">📸 TAKE BIN PHOTO (optional)</button>
@@ -75,18 +77,23 @@
 
 <!-- Camera -->
 <div id="scan" class="hidden">
-  <div id="reader"></div>
+  <div id="reader" class="hidden"></div>
+  <video id="vid" class="hidden" playsinline muted></video>
   <p id="scanMsg"></p>
   <button class="grey" onclick="closeScan()">CANCEL</button>
 </div>
 
 <script>
-  const API = 'https://script.google.com/a/macros/zomato.com/s/APKA_POORA_ASLI_URL/exec';
+const API = 'https://script.google.com/a/macros/zomato.com/s/YOUR_FULL_ID/exec';
   const $ = id => document.getElementById(id);
   const show = id => ['s1','s2','s3'].forEach(s => $(s).classList.toggle('hidden', s !== id));
   const toggle = id => $(id).classList.toggle('hidden');
   const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-  let empId = '', loc = '', photoData = '', h5 = null;
+  let empId = '', loc = '', photoData = '';
+  let h5 = null, stream = null, timer = null;
+
+  // Barcode types accepted (Code 128 / Code 39 / Code 93 + EAN / UPC)
+  const NATIVE_FORMATS = ['code_128', 'code_39', 'code_93', 'ean_13', 'ean_8', 'upc_a', 'upc_e'];
 
   try { $('emp').value = localStorage.getItem('emp') || ''; } catch (e) {}
 
@@ -96,35 +103,94 @@
     if (!j.ok) throw new Error(j.error || 'Save failed');
   }
 
-  // ---------- Live camera scanner ----------
+  // ---------- Scanner ----------
   async function openScan(kind, cb) {
     $('scan').classList.remove('hidden');
     $('scanMsg').textContent = 'Starting camera...';
+    if (kind === 'barcode' && 'BarcodeDetector' in window) {
+      try { await nativeScan(cb); return; }
+      catch (e) { await stopAll(); }
+    }
+    await h5Scan(kind, cb);
+  }
+
+  // Phone's built-in barcode reader (best for linear barcodes)
+  async function nativeScan(cb) {
+    let formats = NATIVE_FORMATS;
+    try {
+      const sup = await BarcodeDetector.getSupportedFormats();
+      formats = NATIVE_FORMATS.filter(f => sup.includes(f));
+    } catch (e) {}
+    if (!formats.length) throw new Error('No supported formats');
+
+    const video = $('vid');
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } }
+    });
+    try {
+      await stream.getVideoTracks()[0].applyConstraints({ advanced: [{ focusMode: 'continuous' }] });
+    } catch (e) {}
+    video.srcObject = stream;
+    video.classList.remove('hidden');
+    await video.play();
+
+    const det = new BarcodeDetector({ formats });
+    let busy = false;
+    timer = setInterval(async () => {
+      if (busy) return;
+      busy = true;
+      try {
+        const r = await det.detect(video);
+        if (r.length && r[0].rawValue) {
+          const t = r[0].rawValue;
+          await closeScan();
+          if (navigator.vibrate) navigator.vibrate(100);
+          cb(String(t).trim());
+        }
+      } catch (e) {}
+      busy = false;
+    }, 150);
+    $('scanMsg').textContent = 'Hold the barcode flat in front of the camera (15-20 cm)';
+  }
+
+  // html5-qrcode (used for QR, and as fallback for barcodes)
+  async function h5Scan(kind, cb) {
+    $('reader').classList.remove('hidden');
     const F = Html5QrcodeSupportedFormats;
-    const formats = kind === 'qr' ? [F.QR_CODE] : [F.EAN_13, F.EAN_8, F.UPC_A, F.UPC_E];
+    const formats = kind === 'qr'
+      ? [F.QR_CODE]
+      : [F.CODE_128, F.CODE_39, F.CODE_93, F.EAN_13, F.EAN_8, F.UPC_A, F.UPC_E];
     h5 = new Html5Qrcode('reader', {
       formatsToSupport: formats, verbose: false,
       experimentalFeatures: { useBarCodeDetectorIfSupported: true }
     });
-    const box = kind === 'qr' ? { width: 250, height: 250 } : { width: 320, height: 140 };
+    const cfg = kind === 'qr' ? { fps: 10, qrbox: { width: 250, height: 250 } } : { fps: 15 };
+    const cam = { facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1080 } };
     try {
-      await h5.start({ facingMode: 'environment' }, { fps: 10, qrbox: box },
-        async text => {
-          if (!h5) return;
-          await closeScan();
-          if (navigator.vibrate) navigator.vibrate(100);
-          cb(String(text).trim());
-        }, () => {});
-      $('scanMsg').textContent = kind === 'qr' ? 'Point camera at the location QR' : 'Point camera at the barcode';
+      await h5.start(cam, cfg, async text => {
+        if (!h5) return;
+        await closeScan();
+        if (navigator.vibrate) navigator.vibrate(100);
+        cb(String(text).trim());
+      }, () => {});
+      $('scanMsg').textContent = kind === 'qr' ? 'Point camera at the location QR' : 'Hold the barcode flat in front of the camera';
     } catch (e) {
       $('scanMsg').textContent = 'Camera did not open. Allow Camera permission in the browser.';
     }
   }
 
-  async function closeScan() {
+  async function stopAll() {
+    if (timer) { clearInterval(timer); timer = null; }
+    if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
+    const v = $('vid'); v.srcObject = null; v.classList.add('hidden');
     const x = h5; h5 = null;
     try { if (x && x.isScanning) await x.stop(); } catch (e) {}
     try { if (x) x.clear(); } catch (e) {}
+    $('reader').classList.add('hidden');
+  }
+
+  async function closeScan() {
+    await stopAll();
     $('scan').classList.add('hidden');
   }
 
@@ -151,7 +217,7 @@
 
   function scanUpc() { openScan('barcode', t => { $('upc').value = t; $('qty').focus(); }); }
 
-  // ---------- Bin photo (opens the camera directly) ----------
+  // ---------- Bin photo ----------
   function takePhoto() { $('photo').click(); }
 
   $('photo').addEventListener('change', e => {
@@ -186,7 +252,7 @@
     clearPhoto();
   }
 
-  // ---------- Save: ONE row with everything ----------
+  // ---------- Save: ONE row ----------
   async function saveRow() {
     const upc = $('upc').value.trim(), qty = $('qty').value, remarks = $('remark').value.trim();
     if (upc) {
